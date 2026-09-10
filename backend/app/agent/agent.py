@@ -6,7 +6,12 @@ from strands.models.litellm import LiteLLMModel
 from dotenv import load_dotenv
 
 from app.agent.prompts import SYSTEM_PROMPT
-from app.agent.tools import get_customer
+from app.agent.tools import (
+    get_customer,
+    create_customer,
+    check_technician_availability,
+    get_technician_details,
+)
 
 load_dotenv()
 
@@ -33,7 +38,12 @@ def _build_agent() -> Agent:
     agent = Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[get_customer],
+        tools=[
+            get_customer,
+            create_customer,
+            check_technician_availability,
+            get_technician_details,
+        ],
     )
 
     print("Loaded Strands tools:", agent.tool_names)
