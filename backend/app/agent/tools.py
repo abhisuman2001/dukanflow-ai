@@ -5,6 +5,24 @@ from app.database.mongodb import get_db
 
 
 # ──────────────────────────────────────────────
+# Internal activity logger
+# ──────────────────────────────────────────────
+
+def _log(action: str, description: str, meta: dict = None):
+    """Write a lightweight activity entry to MongoDB. Never raises."""
+    try:
+        db = get_db()
+        db["activity"].insert_one({
+            "action": action,
+            "description": description,
+            "meta": meta or {},
+            "ts": datetime.utcnow().isoformat(),
+        })
+    except Exception:
+        pass  # Activity logging is best-effort — never break main flow
+
+
+# ──────────────────────────────────────────────
 # Customer tools
 # ──────────────────────────────────────────────
 
@@ -23,25 +41,24 @@ def get_customer(phone: str) -> dict:
     db = get_db()
 
     # Search by phone field; strip whitespace so minor formatting differences don't break lookup
-    customer = db["customers"].find_one({
-        "phone": phone.strip()
-    })
+    result = db["customers"].find_one({"phone": phone.strip()})
 
-    if not customer:
+    if not result:
         return {
             "found": False,
             "message": f"No customer found with phone number {phone}."
         }
 
+    _log("customer_lookup", f"Looked up customer {result.get('name')} ({phone})", {"phone": phone})
+
     # Return only safe, relevant fields
     return {
         "found": True,
-        "name": customer.get("name", "N/A"),
-        "phone": customer.get("phone", "N/A"),
-        "email": customer.get("email", "N/A"),
-        "address": customer.get("address", "N/A"),
+        "name": result.get("name", "N/A"),
+        "phone": result.get("phone", "N/A"),
+        "email": result.get("email", "N/A"),
+        "address": result.get("address", "N/A"),
     }
-
 
 @tool
 def create_customer(name: str, phone: str, email: str = "", address: str = "") -> dict:
@@ -363,6 +380,12 @@ def assign_technician(appointment_id: str, technician_id: str) -> dict:
         },
     )
 
+    _log(
+        "technician_assigned",
+        f"Assigned {technician.get('name')} to appointment on {appointment['date']}",
+        {"appointment_id": appointment_id, "technician_id": technician_id},
+    )
+
     return {
         "assigned": True,
         "appointment_id": appointment_id,
@@ -374,6 +397,316 @@ def assign_technician(appointment_id: str, technician_id: str) -> dict:
         "message": (
             f"Technician {technician.get('name')} has been confirmed for the appointment on "
             f"{appointment['date']} at {appointment.get('time_slot', 'N/A')}."
+        ),
+    }
+
+
+# ──────────────────────────────────────────────
+# Operations tools (Day 4)
+# ──────────────────────────────────────────────
+
+@tool
+def update_job_status(appointment_id: str, status: str) -> dict:
+    """
+    Update the status of an existing service job / appointment.
+
+    Valid statuses: scheduled, assigned, in_progress, completed, cancelled.
+
+    Args:
+        appointment_id: The MongoDB ObjectId string of the appointment.
+        status:         The new status to set.
+
+    Returns:
+        A dict confirming the update, or an error dict.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    VALID_STATUSES = {"scheduled", "assigned", "in_progress", "completed", "cancelled"}
+
+    db = get_db()
+
+    # Validate status early so we don't hit the DB unnecessarily
+    normalised_status = status.strip().lower()
+    if normalised_status not in VALID_STATUSES:
+        return {
+            "success": False,
+            "message": (
+                f"'{status}' is not a valid status. "
+                f"Choose from: {', '.join(sorted(VALID_STATUSES))}."
+            ),
+        }
+
+    # Validate ObjectId
+    try:
+        appt_oid = ObjectId(appointment_id.strip())
+    except InvalidId:
+        return {
+            "success": False,
+            "message": f"'{appointment_id}' is not a valid appointment id.",
+        }
+
+    # Verify the appointment exists
+    appointment = db["appointments"].find_one({"_id": appt_oid})
+    if not appointment:
+        return {
+            "success": False,
+            "message": f"No job/appointment found with id {appointment_id}.",
+        }
+
+    updated_at = datetime.utcnow().isoformat()
+
+    result = db["appointments"].update_one(
+        {"_id": appt_oid},
+        {"$set": {"status": normalised_status, "updated_at": updated_at}},
+    )
+
+    if result.modified_count == 0:
+        # Document exists but nothing changed (status was already the same)
+        return {
+            "success": False,
+            "message": (
+                f"Status was already '{normalised_status}'. No update was made."
+            ),
+        }
+
+    _log(
+        "job_status_updated",
+        f"Job status updated to '{normalised_status}'",
+        {"appointment_id": appointment_id, "status": normalised_status},
+    )
+
+    return {
+        "success": True,
+        "job_id": appointment_id,
+        "status": normalised_status,
+        "updated_at": updated_at,
+        "message": "Job status updated successfully.",
+    }
+
+
+@tool
+def generate_invoice(appointment_id: str) -> dict:
+    """
+    Generate an invoice for a completed service job.
+
+    The job must be in 'completed' status before an invoice can be raised.
+    Duplicate invoices for the same job are prevented.
+
+    Args:
+        appointment_id: The MongoDB ObjectId string of the completed appointment.
+
+    Returns:
+        A dict with invoice details, or an error dict.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    TAX_RATE = 0.18          # 18 % GST
+    BASE_SERVICE_CHARGE = 500  # ₹ 500 flat base labour charge (INR)
+    SKILL_RATES = {           # additional skill-based charge in INR
+        "ac": 999,
+        "refrigerator": 799,
+        "washing_machine": 699,
+        "microwave": 499,
+        "geyser": 599,
+    }
+
+    db = get_db()
+
+    # Validate ObjectId
+    try:
+        appt_oid = ObjectId(appointment_id.strip())
+    except InvalidId:
+        return {
+            "success": False,
+            "message": f"'{appointment_id}' is not a valid appointment id.",
+        }
+
+    # Verify the appointment exists
+    appointment = db["appointments"].find_one({"_id": appt_oid})
+    if not appointment:
+        return {
+            "success": False,
+            "message": f"No job/appointment found with id {appointment_id}.",
+        }
+
+    # Must be completed before invoicing
+    if appointment.get("status") != "completed":
+        return {
+            "success": False,
+            "message": (
+                f"Cannot generate invoice: job status is "
+                f"'{appointment.get('status', 'unknown')}'. "
+                "The job must be marked 'completed' first."
+            ),
+        }
+
+    # Prevent duplicate invoices
+    existing_invoice = db["invoices"].find_one({"appointment_id": appointment_id.strip()})
+    if existing_invoice:
+        return {
+            "success": False,
+            "invoice_id": str(existing_invoice["_id"]),
+            "message": (
+                f"An invoice already exists for this job "
+                f"(invoice id: {existing_invoice['_id']})."
+            ),
+        }
+
+    # Calculate charges
+    skill_key = appointment.get("skill", "").lower()
+    skill_charge = SKILL_RATES.get(skill_key, 400)  # default ₹400 for unknown skills
+    subtotal = BASE_SERVICE_CHARGE + skill_charge
+    tax = round(subtotal * TAX_RATE, 2)
+    total = round(subtotal + tax, 2)
+
+    # Determine next invoice number
+    invoice_count = db["invoices"].count_documents({})
+    invoice_number = f"INV-{1001 + invoice_count}"
+
+    created_at = datetime.utcnow().isoformat()
+
+    invoice_doc = {
+        "invoice_number": invoice_number,
+        "appointment_id": appointment_id.strip(),
+        "customer_phone": appointment.get("customer_phone", "N/A"),
+        "customer_name": appointment.get("customer_name", "N/A"),
+        "technician_id": appointment.get("technician_id", "N/A"),
+        "technician_name": appointment.get("technician_name", "N/A"),
+        "service": appointment.get("skill", "N/A"),
+        "service_date": appointment.get("date", "N/A"),
+        "subtotal": subtotal,
+        "tax": tax,
+        "tax_rate": f"{int(TAX_RATE * 100)}%",
+        "total": total,
+        "currency": "INR",
+        "status": "generated",
+        "created_at": created_at,
+    }
+
+    result = db["invoices"].insert_one(invoice_doc)
+
+    _log(
+        "invoice_generated",
+        f"Invoice {invoice_number} generated for {invoice_doc['customer_name']} — ₹{total}",
+        {"appointment_id": appointment_id, "invoice_number": invoice_number, "total": total},
+    )
+
+    return {
+        "success": True,
+        "invoice_id": str(result.inserted_id),
+        "invoice_number": invoice_number,
+        "job_id": appointment_id,
+        "customer_name": invoice_doc["customer_name"],
+        "technician_name": invoice_doc["technician_name"],
+        "service": invoice_doc["service"],
+        "subtotal": subtotal,
+        "tax": tax,
+        "total": total,
+        "currency": "INR",
+        "status": "generated",
+        "created_at": created_at,
+        "message": (
+            f"Invoice {invoice_number} generated successfully. "
+            f"Total amount: ₹{total} (incl. 18% GST)."
+        ),
+    }
+
+
+@tool
+def schedule_followup(
+    appointment_id: str,
+    followup_date: str,
+    reason: str,
+) -> dict:
+    """
+    Schedule a customer follow-up after a completed service.
+
+    Args:
+        appointment_id: The MongoDB ObjectId string of the appointment.
+        followup_date:  Date for the follow-up in YYYY-MM-DD format (e.g. "2026-09-20").
+        reason:         Reason / type of follow-up (e.g. "Post-service quality check").
+
+    Returns:
+        A dict confirming the follow-up was scheduled, or an error dict.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    db = get_db()
+
+    # Validate ObjectId
+    try:
+        appt_oid = ObjectId(appointment_id.strip())
+    except InvalidId:
+        return {
+            "success": False,
+            "message": f"'{appointment_id}' is not a valid appointment id.",
+        }
+
+    # Verify the appointment exists
+    appointment = db["appointments"].find_one({"_id": appt_oid})
+    if not appointment:
+        return {
+            "success": False,
+            "message": f"No job/appointment found with id {appointment_id}.",
+        }
+
+    # Prevent duplicate follow-ups for the same job
+    existing = db["followups"].find_one({"appointment_id": appointment_id.strip()})
+    if existing:
+        return {
+            "success": False,
+            "followup_id": str(existing["_id"]),
+            "message": (
+                f"A follow-up is already scheduled for this job on "
+                f"{existing.get('scheduled_for', 'N/A')} "
+                f"(reason: {existing.get('reason', 'N/A')})."
+            ),
+        }
+
+    # Determine next follow-up number
+    followup_count = db["followups"].count_documents({})
+    followup_number = f"FUP-{1001 + followup_count}"
+
+    created_at = datetime.utcnow().isoformat()
+
+    followup_doc = {
+        "followup_number": followup_number,
+        "appointment_id": appointment_id.strip(),
+        "customer_phone": appointment.get("customer_phone", "N/A"),
+        "customer_name": appointment.get("customer_name", "N/A"),
+        "technician_name": appointment.get("technician_name", "N/A"),
+        "service": appointment.get("skill", "N/A"),
+        "scheduled_for": followup_date.strip(),
+        "reason": reason.strip(),
+        "status": "scheduled",
+        "created_at": created_at,
+    }
+
+    result = db["followups"].insert_one(followup_doc)
+
+    _log(
+        "followup_scheduled",
+        f"Follow-up {followup_number} scheduled for {followup_doc['customer_name']} on {followup_date}",
+        {"appointment_id": appointment_id, "followup_number": followup_number, "date": followup_date},
+    )
+
+    return {
+        "success": True,
+        "followup_id": str(result.inserted_id),
+        "followup_number": followup_number,
+        "job_id": appointment_id,
+        "customer_name": followup_doc["customer_name"],
+        "scheduled_for": followup_date.strip(),
+        "reason": reason.strip(),
+        "status": "scheduled",
+        "created_at": created_at,
+        "message": (
+            f"Follow-up {followup_number} scheduled for "
+            f"{appointment.get('customer_name', 'the customer')} "
+            f"on {followup_date} — {reason}."
         ),
     }
 

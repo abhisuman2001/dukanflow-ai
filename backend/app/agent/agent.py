@@ -14,6 +14,9 @@ from app.agent.tools import (
     book_appointment,
     assign_technician,
     send_customer_message,
+    update_job_status,
+    generate_invoice,
+    schedule_followup,
 )
 
 load_dotenv()
@@ -49,6 +52,9 @@ def _build_agent() -> Agent:
             book_appointment,
             assign_technician,
             send_customer_message,
+            update_job_status,
+            generate_invoice,
+            schedule_followup,
         ],
     )
 
