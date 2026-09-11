@@ -4,6 +4,10 @@ from strands import tool
 from app.database.mongodb import get_db
 
 
+# ──────────────────────────────────────────────
+# Customer tools
+# ──────────────────────────────────────────────
+
 @tool
 def get_customer(phone: str) -> dict:
     """
@@ -188,4 +192,243 @@ def get_technician_details(technician_id: str) -> dict:
         "rating": tech.get("rating", "N/A"),
         "experience_years": tech.get("experience_years", "N/A"),
         "unavailable_dates": tech.get("unavailable_dates", []),
+    }
+
+
+# ──────────────────────────────────────────────
+# Appointment tools
+# ──────────────────────────────────────────────
+
+@tool
+def book_appointment(
+    customer_phone: str,
+    technician_id: str,
+    skill: str,
+    date: str,
+    time_slot: str = "10:00 AM",
+    notes: str = "",
+) -> dict:
+    """
+    Create a new service appointment and persist it to the database.
+
+    Always call get_customer and check_technician_availability BEFORE this tool
+    to confirm the customer exists and the technician is free.
+
+    Args:
+        customer_phone: The customer's phone number (e.g. "9876543210").
+        technician_id:  The MongoDB ObjectId string of the assigned technician.
+        skill:          The appliance/service type (e.g. "AC", "washing_machine").
+        date:           Service date in YYYY-MM-DD format (e.g. "2026-09-15").
+        time_slot:      Preferred time slot (default "10:00 AM").
+        notes:          Any additional instructions from the customer.
+
+    Returns:
+        A dict with the created appointment id and summary, or an error dict.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    db = get_db()
+
+    # Validate customer
+    customer = db["customers"].find_one({"phone": customer_phone.strip()})
+    if not customer:
+        return {
+            "booked": False,
+            "message": f"No customer found with phone {customer_phone}. "
+                       "Please register the customer first using create_customer.",
+        }
+
+    # Validate technician
+    try:
+        tech_oid = ObjectId(technician_id.strip())
+    except InvalidId:
+        return {"booked": False, "message": f"'{technician_id}' is not a valid technician id."}
+
+    technician = db["technicians"].find_one({"_id": tech_oid})
+    if not technician:
+        return {"booked": False, "message": f"No technician found with id {technician_id}."}
+
+    # Guard: no double-booking the technician on the same date
+    existing = db["appointments"].find_one({
+        "technician_id": technician_id.strip(),
+        "date": date.strip(),
+        "status": {"$in": ["scheduled", "confirmed"]},
+    })
+    if existing:
+        return {
+            "booked": False,
+            "message": f"Technician {technician.get('name')} already has an appointment on {date}. "
+                       "Please choose a different technician or date.",
+        }
+
+    appointment = {
+        "customer_phone": customer_phone.strip(),
+        "customer_name": customer.get("name", "N/A"),
+        "technician_id": technician_id.strip(),
+        "technician_name": technician.get("name", "N/A"),
+        "skill": skill.strip(),
+        "date": date.strip(),
+        "time_slot": time_slot.strip(),
+        "notes": notes.strip(),
+        "status": "scheduled",
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+    result = db["appointments"].insert_one(appointment)
+    appointment_id = str(result.inserted_id)
+
+    return {
+        "booked": True,
+        "appointment_id": appointment_id,
+        "customer_name": appointment["customer_name"],
+        "technician_name": appointment["technician_name"],
+        "skill": appointment["skill"],
+        "date": appointment["date"],
+        "time_slot": appointment["time_slot"],
+        "status": "scheduled",
+        "message": (
+            f"Appointment booked successfully! "
+            f"{appointment['technician_name']} will visit {appointment['customer_name']} "
+            f"on {appointment['date']} at {appointment['time_slot']} for {appointment['skill']} service."
+        ),
+    }
+
+
+@tool
+def assign_technician(appointment_id: str, technician_id: str) -> dict:
+    """
+    Assign (or reassign) a technician to an existing appointment.
+
+    Use this after book_appointment if you need to change the technician,
+    or to confirm the assignment and update the appointment status to 'confirmed'.
+
+    Args:
+        appointment_id: The MongoDB ObjectId string of the appointment.
+        technician_id:  The MongoDB ObjectId string of the technician to assign.
+
+    Returns:
+        A dict confirming the assignment, or an error dict.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    db = get_db()
+
+    # Validate appointment
+    try:
+        appt_oid = ObjectId(appointment_id.strip())
+    except InvalidId:
+        return {"assigned": False, "message": f"'{appointment_id}' is not a valid appointment id."}
+
+    appointment = db["appointments"].find_one({"_id": appt_oid})
+    if not appointment:
+        return {"assigned": False, "message": f"No appointment found with id {appointment_id}."}
+
+    # Validate technician
+    try:
+        tech_oid = ObjectId(technician_id.strip())
+    except InvalidId:
+        return {"assigned": False, "message": f"'{technician_id}' is not a valid technician id."}
+
+    technician = db["technicians"].find_one({"_id": tech_oid})
+    if not technician:
+        return {"assigned": False, "message": f"No technician found with id {technician_id}."}
+
+    # Check for double-booking on that date (excluding this appointment)
+    conflict = db["appointments"].find_one({
+        "_id": {"$ne": appt_oid},
+        "technician_id": technician_id.strip(),
+        "date": appointment["date"],
+        "status": {"$in": ["scheduled", "confirmed"]},
+    })
+    if conflict:
+        return {
+            "assigned": False,
+            "message": (
+                f"Technician {technician.get('name')} already has a confirmed appointment on "
+                f"{appointment['date']}. Choose a different technician."
+            ),
+        }
+
+    db["appointments"].update_one(
+        {"_id": appt_oid},
+        {
+            "$set": {
+                "technician_id": technician_id.strip(),
+                "technician_name": technician.get("name", "N/A"),
+                "status": "confirmed",
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        },
+    )
+
+    return {
+        "assigned": True,
+        "appointment_id": appointment_id,
+        "technician_name": technician.get("name", "N/A"),
+        "technician_phone": technician.get("phone", "N/A"),
+        "date": appointment["date"],
+        "time_slot": appointment.get("time_slot", "N/A"),
+        "status": "confirmed",
+        "message": (
+            f"Technician {technician.get('name')} has been confirmed for the appointment on "
+            f"{appointment['date']} at {appointment.get('time_slot', 'N/A')}."
+        ),
+    }
+
+
+@tool
+def send_customer_message(
+    customer_phone: str,
+    message_text: str,
+    message_type: str = "notification",
+) -> dict:
+    """
+    Record and send a message to a customer (e.g. appointment confirmation, reminder, update).
+
+    In this demo the message is logged to the database. In production this would
+    trigger an SMS/WhatsApp gateway. Always verify the customer exists first.
+
+    Args:
+        customer_phone: The customer's phone number (e.g. "9876543210").
+        message_text:   The message content to send to the customer.
+        message_type:   Type of message — one of: "notification", "reminder",
+                        "confirmation", "update", "invoice". Defaults to "notification".
+
+    Returns:
+        A dict confirming the message was queued/logged, or an error dict.
+    """
+    db = get_db()
+
+    customer = db["customers"].find_one({"phone": customer_phone.strip()})
+    if not customer:
+        return {
+            "sent": False,
+            "message": f"No customer found with phone {customer_phone}. Cannot send message.",
+        }
+
+    log_entry = {
+        "customer_phone": customer_phone.strip(),
+        "customer_name": customer.get("name", "N/A"),
+        "message_text": message_text.strip(),
+        "message_type": message_type.strip(),
+        "channel": "sms",  # In production: SMS / WhatsApp
+        "status": "queued",
+        "sent_at": datetime.utcnow().isoformat(),
+    }
+
+    result = db["messages"].insert_one(log_entry)
+
+    return {
+        "sent": True,
+        "message_id": str(result.inserted_id),
+        "customer_name": customer.get("name", "N/A"),
+        "customer_phone": customer_phone.strip(),
+        "message_type": message_type,
+        "preview": message_text[:120] + ("…" if len(message_text) > 120 else ""),
+        "message": (
+            f"Message successfully queued for {customer.get('name')} ({customer_phone}). "
+            f"They will receive it via SMS/WhatsApp."
+        ),
     }
