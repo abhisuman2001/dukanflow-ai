@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from app.database.mongodb import ping_db
 from app.routes.agent_routes import router as agent_router
+from app.routes.data_routes import router as data_router
 
 load_dotenv()
 
@@ -44,6 +45,7 @@ app.add_middleware(
 
 # --- Routes ---
 app.include_router(agent_router)
+app.include_router(data_router)
 
 
 @app.get("/api/health", tags=["health"])
