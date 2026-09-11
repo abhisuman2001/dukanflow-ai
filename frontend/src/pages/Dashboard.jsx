@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import AppShell from '../components/layout/AppShell'
 import StatusBadge from '../components/ui/StatusBadge'
 import { TableSkeleton, Spinner } from '../components/ui/LoadingState'
@@ -114,7 +114,6 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState(null)
   const [refreshing, setRefreshing] = useState(false)
-  const navigate = useNavigate()
 
   const load = async (soft = false) => {
     if (soft) setRefreshing(true)

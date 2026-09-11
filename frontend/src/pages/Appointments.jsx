@@ -8,7 +8,6 @@ import { TableSkeleton, Spinner } from '../components/ui/LoadingState'
 import {
   fetchAppointments,
   fetchAppointment,
-  fetchTechnicians,
   updateAppointmentStatus,
   generateInvoiceForAppointment,
   scheduleFollowupForAppointment,
@@ -248,8 +247,10 @@ function AppointmentDrawer({ appointmentId, onClose, onUpdated }) {
   const canFollowup  = !appt?.followup
 
   const statusLabel = {
-    assigned: 'Mark Assigned', in_progress: 'Start Job',
-    completed: 'Mark Completed', cancelled: 'Cancel',
+    assigned:    'Mark Assigned',
+    in_progress: 'Start Job',
+    completed:   'Mark Completed',
+    cancelled:   'Cancel Job',
   }
 
   return (
@@ -272,7 +273,11 @@ function AppointmentDrawer({ appointmentId, onClose, onUpdated }) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-surface-100">
           <div>
             <h2 className="text-sm font-bold text-surface-900">Appointment Details</h2>
-            {appt && <p className="text-xs text-surface-400 mt-0.5 font-mono">{appt._id}</p>}
+            {appt && (
+              <p className="text-xs text-surface-400 mt-0.5">
+                {appt.customer_name} · {appt.date}
+              </p>
+            )}
           </div>
           <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded hover:bg-surface-100 text-surface-500">
             <I.X className="w-4 h-4" />
@@ -342,10 +347,7 @@ function AppointmentDrawer({ appointmentId, onClose, onUpdated }) {
                 <p className="text-2xs font-semibold text-surface-500 uppercase tracking-wider mb-1">Technician</p>
                 <div className="bg-surface-50 rounded-md px-3 py-1">
                   {appt.technician_name ? (
-                    <>
-                      <DetailRow label="Name" value={appt.technician_name} />
-                      <DetailRow label="ID"   value={appt.technician_id} mono />
-                    </>
+                    <DetailRow label="Name" value={appt.technician_name} />
                   ) : (
                     <div className="py-2 flex items-center gap-2">
                       <I.Alert className="w-3.5 h-3.5 text-amber-500" />

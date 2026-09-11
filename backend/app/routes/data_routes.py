@@ -19,17 +19,124 @@ def _oid(doc: dict) -> dict:
 
 @router.get("/customers")
 def list_customers(search: str = Query(default="")):
+    from datetime import datetime, timezone
     db = get_db()
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     query = {}
     if search.strip():
         query = {
             "$or": [
-                {"name": {"$regex": search.strip(), "$options": "i"}},
+                {"name":  {"$regex": search.strip(), "$options": "i"}},
                 {"phone": {"$regex": search.strip(), "$options": "i"}},
+                {"email": {"$regex": search.strip(), "$options": "i"}},
             ]
         }
     customers = [_oid(c) for c in db["customers"].find(query).sort("name", 1)]
+
+    # Annotate each customer with job stats (no ObjectIds exposed)
+    for c in customers:
+        phone = c.get("phone", "")
+        all_appts = list(db["appointments"].find({"customer_phone": phone}))
+        c["total_jobs"] = len(all_appts)
+
+        completed = [a for a in all_appts if a.get("status") == "completed"]
+        if completed:
+            latest = max(completed, key=lambda a: a.get("date", ""))
+            c["last_service_date"]  = latest.get("date")
+            c["last_service_skill"] = latest.get("skill", "")
+        else:
+            c["last_service_date"]  = None
+            c["last_service_skill"] = None
+
     return {"customers": customers, "total": len(customers)}
+
+
+@router.get("/customers/{phone}")
+def get_customer_by_phone(phone: str):
+    from datetime import datetime, timezone
+    db = get_db()
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    customer = db["customers"].find_one({"phone": phone.strip()})
+    if not customer:
+        raise HTTPException(status_code=404, detail=f"No customer with phone {phone}.")
+    customer = _oid(customer)
+
+    # Full service history — never expose _id to frontend
+    appts_raw = list(db["appointments"].find(
+        {"customer_phone": phone.strip()}
+    ).sort("date", -1))
+
+    history = []
+    for a in appts_raw:
+        appt_id = str(a["_id"])
+        inv = db["invoices"].find_one({"appointment_id": appt_id})
+        history.append({
+            "appointment_ref": appt_id,   # kept for internal navigation only
+            "date":       a.get("date"),
+            "time_slot":  a.get("time_slot"),
+            "skill":      a.get("skill"),
+            "technician": a.get("technician_name"),
+            "status":     a.get("status"),
+            "invoice_number": inv.get("invoice_number") if inv else None,
+            "invoice_total":  inv.get("total")          if inv else None,
+        })
+
+    # Upcoming appointments
+    upcoming = [h for h in history if (h.get("date") or "") >= today_str
+                and h.get("status") not in ("completed", "cancelled")]
+
+    customer["service_history"] = history
+    customer["upcoming"]        = upcoming[:3]
+    customer["total_jobs"]      = len(history)
+
+    return customer
+
+
+@router.post("/customers")
+def create_customer_endpoint(body: dict):
+    from datetime import datetime
+    db = get_db()
+
+    name  = (body.get("name")  or "").strip()
+    phone = (body.get("phone") or "").strip()
+    if not name or not phone:
+        raise HTTPException(status_code=400, detail="name and phone are required.")
+
+    if db["customers"].find_one({"phone": phone}):
+        raise HTTPException(status_code=409, detail=f"A customer with phone {phone} already exists.")
+
+    doc = {
+        "name":           name,
+        "phone":          phone,
+        "email":          (body.get("email")   or "").strip(),
+        "address":        (body.get("address") or "").strip(),
+        "preferred_time": (body.get("preferred_time") or "").strip(),
+        "created_at":     datetime.utcnow().isoformat(),
+    }
+    result = db["customers"].insert_one(doc)
+    doc["_id"] = str(result.inserted_id)
+    return doc
+
+
+@router.patch("/customers/{phone}")
+def update_customer_endpoint(phone: str, body: dict):
+    from datetime import datetime
+    db = get_db()
+
+    customer = db["customers"].find_one({"phone": phone.strip()})
+    if not customer:
+        raise HTTPException(status_code=404, detail=f"No customer with phone {phone}.")
+
+    allowed = {"name", "email", "address", "preferred_time"}
+    updates = {k: v for k, v in body.items() if k in allowed and v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update.")
+
+    updates["updated_at"] = datetime.utcnow().isoformat()
+    db["customers"].update_one({"phone": phone.strip()}, {"$set": updates})
+    return {"success": True, "phone": phone, **updates}
 
 
 # ─── Technicians ──────────────────────────────────────────────────────────────
