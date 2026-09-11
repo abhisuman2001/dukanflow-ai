@@ -310,7 +310,7 @@ function TechnicianDrawer({ techId, onClose, onUpdated }) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-surface-100 shrink-0">
           <div>
             <h2 className="text-sm font-bold text-surface-900">Technician Detail</h2>
-            {tech && <p className="text-xs text-surface-400 mt-0.5">{tech._id}</p>}
+            {tech && <p className="text-xs text-surface-400 mt-0.5">{tech.name} · {tech.phone}</p>}
           </div>
           <div className="flex items-center gap-1">
             {mode === 'view' && tech && (
