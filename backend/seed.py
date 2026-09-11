@@ -1,8 +1,8 @@
 """
-seed.py — Populate the database with demo customer data for DukaanFlow.
+seed.py — Populate the database with demo customer and technician data for DukaanFlow.
 
 Safe to run multiple times — uses upsert keyed on phone number,
-so existing customers are never duplicated.
+so existing records are never duplicated.
 
 Run with:
     .venv\\Scripts\\python seed.py
@@ -38,6 +38,59 @@ CUSTOMERS = [
     },
 ]
 
+TECHNICIANS = [
+    {
+        "name": "Ravi Prasad",
+        "phone": "9800000001",
+        "skills": ["AC", "refrigerator"],
+        "rating": 4.8,
+        "experience_years": 7,
+        "unavailable_dates": [],
+    },
+    {
+        "name": "Suresh Mahto",
+        "phone": "9800000002",
+        "skills": ["washing_machine", "microwave"],
+        "rating": 4.5,
+        "experience_years": 5,
+        "unavailable_dates": ["2026-09-12"],
+    },
+    {
+        "name": "Deepak Yadav",
+        "phone": "9800000003",
+        "skills": ["geyser", "AC", "microwave"],
+        "rating": 4.7,
+        "experience_years": 6,
+        "unavailable_dates": [],
+    },
+    {
+        "name": "Meena Devi",
+        "phone": "9800000004",
+        "skills": ["washing_machine", "refrigerator", "geyser"],
+        "rating": 4.9,
+        "experience_years": 8,
+        "unavailable_dates": ["2026-09-15"],
+    },
+]
+
+
+def seed_collection(collection, records, key_field: str, label: str):
+    inserted = 0
+    skipped = 0
+    for record in records:
+        result = collection.update_one(
+            {key_field: record[key_field]},   # lookup key
+            {"$setOnInsert": record},          # only write on insert, never overwrite
+            upsert=True,
+        )
+        if result.upserted_id:
+            inserted += 1
+            print(f"  ✅ Inserted {label}: {record['name']} ({record[key_field]})")
+        else:
+            skipped += 1
+            print(f"  ⏭  Skipped (exists): {record['name']} ({record[key_field]})")
+    return inserted, skipped
+
 
 def seed():
     uri = os.getenv("MONGODB_URI")
@@ -50,25 +103,17 @@ def seed():
 
     client = MongoClient(uri, serverSelectionTimeoutMS=5000)
     db = client[db_name]
-    collection = db["customers"]
 
-    inserted = 0
-    skipped = 0
+    print("\n── Customers ──")
+    ci, cs = seed_collection(db["customers"], CUSTOMERS, "phone", "customer")
 
-    for customer in CUSTOMERS:
-        result = collection.update_one(
-            {"phone": customer["phone"]},   # lookup key
-            {"$setOnInsert": customer},      # only write on insert, never overwrite
-            upsert=True,
-        )
-        if result.upserted_id:
-            inserted += 1
-            print(f"  ✅ Inserted: {customer['name']} ({customer['phone']})")
-        else:
-            skipped += 1
-            print(f"  ⏭  Skipped (already exists): {customer['name']} ({customer['phone']})")
+    print("\n── Technicians ──")
+    ti, ts = seed_collection(db["technicians"], TECHNICIANS, "phone", "technician")
 
-    print(f"\nDone — {inserted} inserted, {skipped} already existed.")
+    print(
+        f"\nDone — customers: {ci} inserted, {cs} skipped | "
+        f"technicians: {ti} inserted, {ts} skipped."
+    )
     client.close()
 
 
